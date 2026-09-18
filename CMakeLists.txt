@@ -69,7 +69,7 @@ target_link_libraries(MrsUavAutostart_AutomaticStart
 )
 
 rclcpp_components_register_nodes(MrsUavAutostart_AutomaticStart
-  "mrs_uav_autostart::automatic_start::AutomaticStart"
+  "mrs_uav_autostart::AutomaticStart"
 )
 
 target_compile_definitions(MrsUavAutostart_AutomaticStart PRIVATE USE_ROS_TIMER=${USE_ROS_TIMER})

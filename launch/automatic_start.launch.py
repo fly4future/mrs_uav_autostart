@@ -108,7 +108,7 @@ def generate_launch_description():
             ComposableNode(
 
                 package=pkg_name,
-                plugin='mrs_uav_autostart::automatic_start::AutomaticStart',
+                plugin='mrs_uav_autostart::AutomaticStart',
                 namespace=uav_name,
                 name='automatic_start',
 
