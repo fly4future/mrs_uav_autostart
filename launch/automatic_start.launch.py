@@ -125,16 +125,11 @@ def generate_launch_description():
                 remappings=[
                     # subscribers
                     ("~/hw_api_status_in", "hw_api/status"),
-                    ("~/hw_api_capabilities_in", "hw_api/capabilities"),
                     ("~/control_manager_diagnostics_in", "control_manager/diagnostics"),
-                    ("~/safety_area_manager_diagnostics_in", "safety_area_manager/diagnostics"),
-                    ("~/uav_manager_diagnostics_in", "uav_manager/diagnostics"),
                     ("~/gazebo_spawner_diagnostics_in", "/mrs_drone_spawner/diagnostics"),
-                    ("~/estimation_diag_in", "estimation_manager/diagnostics"),
-                    ("~/distance_sensor_in", "hw_api/distance_sensor"),
-                    ("~/imu_in", "hw_api/imu"),
+                    ("~/general_robot_info_in", "diagnostics_manager/general_robot_info"),
                     # publishers
-                    ("~/can_takeoff_out", "~/can_takeoff"),
+                    ("~/ready_to_enable_control_output_out", "~/ready_to_enable_control_output"),
                     # services out
                     ("~/takeoff_out", "uav_manager/takeoff"),
                     ("~/toggle_control_output_out", "control_manager/toggle_output"),
