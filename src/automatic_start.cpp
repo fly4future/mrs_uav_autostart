@@ -12,7 +12,6 @@
 #include <mrs_lib/node.h>
 
 #include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/empty.hpp>
 
 #include <std_srvs/srv/trigger.hpp>
 #include <std_srvs/srv/set_bool.hpp>
