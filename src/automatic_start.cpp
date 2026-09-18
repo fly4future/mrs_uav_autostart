@@ -129,7 +129,6 @@ private:
 
   // | ---------------------- other params ---------------------- |
 
-  std::string _body_frame_name_;
   double      _pre_takeoff_sleep_;
   bool        _handle_takeoff_ = false;
   double      _safety_timeout_;
@@ -189,7 +188,6 @@ AutomaticStart::AutomaticStart(rclcpp::NodeOptions options) : Node("automatic_st
   param_loader.loadParam("simulation", _simulation_);
 
   param_loader.loadParam("mrs_uav_autostart/main_timer_rate", _main_timer_rate_);
-  param_loader.loadParam("mrs_uav_autostart/body_frame_name", _body_frame_name_);
   param_loader.loadParam("mrs_uav_autostart/control_output_timeout", _control_output_timeout_);
 
   param_loader.loadParam("mrs_uav_autostart/safety_timeout", _safety_timeout_);
