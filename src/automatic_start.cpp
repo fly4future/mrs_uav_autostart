@@ -188,14 +188,14 @@ AutomaticStart::AutomaticStart(rclcpp::NodeOptions options) : Node("automatic_st
   param_loader.loadParam("uav_name", _uav_name_);
   param_loader.loadParam("simulation", _simulation_);
 
-  param_loader.loadParam("main_timer_rate", _main_timer_rate_);
-  param_loader.loadParam("body_frame_name", _body_frame_name_);
-  param_loader.loadParam("control_output_timeout", _control_output_timeout_);
+  param_loader.loadParam("mrs_uav_autostart/main_timer_rate", _main_timer_rate_);
+  param_loader.loadParam("mrs_uav_autostart/body_frame_name", _body_frame_name_);
+  param_loader.loadParam("mrs_uav_autostart/control_output_timeout", _control_output_timeout_);
 
-  param_loader.loadParam("safety_timeout", _safety_timeout_);
-  param_loader.loadParam("pre_takeoff_sleep", _pre_takeoff_sleep_);
+  param_loader.loadParam("mrs_uav_autostart/safety_timeout", _safety_timeout_);
+  param_loader.loadParam("mrs_uav_autostart/pre_takeoff_sleep", _pre_takeoff_sleep_);
 
-  param_loader.loadParam("handle_takeoff", _handle_takeoff_);
+  param_loader.loadParam("mrs_uav_autostart/handle_takeoff", _handle_takeoff_);
 
   if (!param_loader.loadedSuccessfully()) {
     RCLCPP_ERROR(this_node().get_logger(), "Could not load all parameters!");
