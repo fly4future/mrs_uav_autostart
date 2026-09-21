@@ -23,6 +23,7 @@ private:
   rclcpp::Subscription<mrs_msgs::msg::ErrorgraphElement>::SharedPtr sub_errors_;
   std::mutex                                                        errors_mtx_;
   std::optional<mrs_msgs::msg::ErrorgraphElement>                   last_msg_;
+  bool                                                              saw_any_waiting_error_ = false;
 
   void errorsCallback(const mrs_msgs::msg::ErrorgraphElement::SharedPtr msg);
 };
@@ -40,6 +41,13 @@ void Tester::errorsCallback(const mrs_msgs::msg::ErrorgraphElement::SharedPtr ms
   // Only track messages from AutomaticStart — the shared /errors topic carries messages from all managers
   if (msg->source_node.node == "AutomaticStart" && msg->source_node.component == "main") {
     last_msg_ = *msg;
+
+    for (const auto &error : msg->errors) {
+      if (error.type == mrs_msgs::msg::ErrorgraphError::TYPE_WAITING_FOR_NODE) {
+        saw_any_waiting_error_ = true;
+        break;
+      }
+    }
   }
 }
 
@@ -47,69 +55,44 @@ bool Tester::test(void) {
 
   RCLCPP_INFO(node_->get_logger(), "Waiting for errorgraph errors to clear after startup...");
 
-  // We expect this lifecycle:
-  //   1. AutomaticStart publishes waiting_for_node errors during startup
-  //   2. Once all dependencies are ready, it stops adding errors
-  //   3. ErrorPublisher clears after each publish -> subsequent messages have empty errors
-  //
-  // We poll for up to 90 seconds for N consecutive messages with no waiting_for_node errors.
+  // AutomaticStart reports waiting_for_node during startup, then stops once ready.
+  const int required_consecutive_clean = 3;
+  int       consecutive_clean          = 0;
 
-  const double timeout_s                  = 90.0;
-  const double poll_rate_s                = 0.2;
-  const int    required_consecutive_clean = 3;
+  const auto clean_deadline = node_->get_clock()->now() + rclcpp::Duration(90s);
 
-  double elapsed               = 0.0;
-  int    consecutive_clean     = 0;
-  bool   saw_any_waiting_error = false;
+  while (rclcpp::ok() && node_->get_clock()->now() < clean_deadline && consecutive_clean < required_consecutive_clean) {
 
-  while (rclcpp::ok() && elapsed < timeout_s) {
-
-    sleep(poll_rate_s);
-    elapsed += poll_rate_s;
+    sleep(0.2);
 
     std::scoped_lock lck(errors_mtx_);
-
     if (!last_msg_.has_value()) {
       continue;
     }
 
-    const auto &element = last_msg_.value();
-
     bool has_waiting_for_node = false;
-    for (const auto &error : element.errors) {
+    for (const auto &error : last_msg_->errors) {
       if (error.type == mrs_msgs::msg::ErrorgraphError::TYPE_WAITING_FOR_NODE) {
-        has_waiting_for_node  = true;
-        saw_any_waiting_error = true;
+        has_waiting_for_node = true;
         break;
       }
     }
 
-    if (!has_waiting_for_node) {
-      consecutive_clean++;
-      RCLCPP_INFO(node_->get_logger(), "Clean message %d/%d (errors: %zu)", consecutive_clean, required_consecutive_clean, element.errors.size());
-    } else {
-      consecutive_clean = 0;
-    }
-
-    if (consecutive_clean >= required_consecutive_clean) {
-      break;
-    }
+    consecutive_clean = has_waiting_for_node ? 0 : consecutive_clean + 1;
   }
 
   if (consecutive_clean < required_consecutive_clean) {
-    RCLCPP_ERROR(node_->get_logger(),
-                 "FAILED: errorgraph errors did not clear within %.1f seconds "
-                 "(saw_waiting_errors=%s, consecutive_clean=%d/%d)",
-                 timeout_s, saw_any_waiting_error ? "true" : "false", consecutive_clean, required_consecutive_clean);
+    RCLCPP_ERROR(node_->get_logger(), "FAILED: errorgraph errors did not clear after startup");
     return false;
   }
 
-  if (!saw_any_waiting_error) {
-    RCLCPP_WARN(node_->get_logger(), "WARNING: errors cleared but no waiting_for_node errors were observed "
-                                     "during startup (startup window may have been missed)");
+  std::scoped_lock lck(errors_mtx_);
+  if (!saw_any_waiting_error_) {
+    RCLCPP_ERROR(node_->get_logger(), "FAILED: never observed a waiting_for_node error, so clearing proves nothing");
+    return false;
   }
 
-  RCLCPP_INFO(node_->get_logger(), "SUCCESS: errorgraph errors cleared after startup (%d consecutive clean messages).", consecutive_clean);
+  RCLCPP_INFO(node_->get_logger(), "SUCCESS: errorgraph errors cleared after startup.");
   return true;
 }
 
