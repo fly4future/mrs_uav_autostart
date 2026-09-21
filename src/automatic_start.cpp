@@ -2,6 +2,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include <array>
+
 #include <mrs_lib/coro/task.hpp>
 #include <mrs_lib/param_loader.h>
 #include <mrs_lib/mutex.h>
@@ -26,9 +28,9 @@
 /* typedefs //{ */
 
 #if USE_ROS_TIMER == 1
-typedef mrs_lib::ROSTimer TimerType;
+using TimerType = mrs_lib::ROSTimer;
 #else
-typedef mrs_lib::ThreadTimer TimerType;
+using TimerType = mrs_lib::ThreadTimer;
 #endif
 
 //}
@@ -39,14 +41,14 @@ namespace mrs_uav_autostart
 /* class AutomaticStart //{ */
 
 // state machine
-typedef enum
+enum LandingStates_t
 {
   STATE_IDLE,
   STATE_TAKEOFF,
   STATE_FINISHED
-} LandingStates_t;
+};
 
-const char *state_names[3] = {"IDLING", "TAKEOFF", "FINISHED"};
+constexpr std::array<const char *, 3> state_names = {"IDLING", "TAKEOFF", "FINISHED"};
 
 class AutomaticStart : public mrs_lib::Node {
 
@@ -110,8 +112,7 @@ private:
   rclcpp::Time offboard_time_;
   bool         offboard_ = false;
 
-  // last confirmed (non-UNKNOWN/LINK_LOST) armed/offboard reading, so a transient staleness gap
-  // (e.g. a ControlManager hiccup) can't reset armed_time_/offboard_time_ -- only a genuine transition
+  // last confirmed armed/offboard reading, so a transient UNKNOWN/LINK_LOST gap can't reset the timers
   bool last_confirmed_armed_    = false;
   bool last_confirmed_offboard_ = false;
 
@@ -138,7 +139,7 @@ private:
 
   // | ---------------------- state machine --------------------- |
 
-  uint                current_state = STATE_IDLE;
+  LandingStates_t     current_state = STATE_IDLE;
   mrs_lib::Task<void> changeState(LandingStates_t new_state);
 };
 
@@ -268,8 +269,7 @@ void AutomaticStart::callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr
   const bool is_armed =
       !(state == mrs_msgs::msg::State::STATE_DISARMED || state == mrs_msgs::msg::State::STATE_LINK_LOST || state == mrs_msgs::msg::State::STATE_UNKNOWN);
 
-  // Allow-list (unlike is_armed above) so an unrecognized future state defaults to false, since this
-  // gates the takeoff transition below. RC_MODE counts as offboard, unlike MANUAL (raw-autopilot RC).
+  // Allow-list so an unrecognized future state defaults to false; RC_MODE counts, MANUAL doesn't.
   const bool is_offboard = state == mrs_msgs::msg::State::STATE_OFFBOARD || state == mrs_msgs::msg::State::STATE_TAKEOFF ||
                            state == mrs_msgs::msg::State::STATE_HOVER || state == mrs_msgs::msg::State::STATE_GOTO ||
                            state == mrs_msgs::msg::State::STATE_TRAJECTORY || state == mrs_msgs::msg::State::STATE_LAND ||
@@ -278,7 +278,7 @@ void AutomaticStart::callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr
   std::scoped_lock lock(mutex_uav_state_);
 
   // check armed_ state
-  if (armed_ == false) {
+  if (!armed_) {
 
     // start the clock, unless recovering from an ambiguous gap (see last_confirmed_armed_ above)
     if (is_armed) {
@@ -289,18 +289,14 @@ void AutomaticStart::callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr
       }
     }
 
-    // if we were armed_ previously
-  } else if (armed_ == true) {
+    // if we were armed_ previously, and we are not really now
+  } else if (!is_armed) {
 
-    // and we are not really now
-    if (!is_armed) {
-
-      armed_ = false;
-    }
+    armed_ = false;
   }
 
   // check offboard_ state
-  if (offboard_ == false) {
+  if (!offboard_) {
 
     // same recovery-from-ambiguity exception as armed_ above
     if (is_offboard) {
@@ -311,14 +307,10 @@ void AutomaticStart::callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr
       }
     }
 
-    // if we were in offboard_ previously
-  } else if (offboard_ == true) {
+    // if we were in offboard_ previously, and we are not really now
+  } else if (!is_offboard) {
 
-    // and we are not really now
-    if (!is_offboard) {
-
-      offboard_ = false;
-    }
+    offboard_ = false;
   }
 
   // latch + update the confirmed-state trackers, skipping ambiguous UNKNOWN/LINK_LOST readings
@@ -367,18 +359,15 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
   bool got_control_info = sh_control_info_.hasMsg();
   bool got_uav_state    = sh_uav_state_.hasMsg() && uav_state_valid_ever_;
 
-  // freshness-checked: published in the same DiagnosticsManager tick as control_info/uav_state,
-  // so this one check also catches DiagnosticsManager having died
+  // freshness-checked, so a dead DiagnosticsManager gets caught too
   bool got_general_robot_info =
       sh_general_robot_info_.hasMsg() && (clock_->now() - sh_general_robot_info_.lastMsgTime()).seconds() <= _diagnostics_manager_timeout_;
 
-  // SafetyAreaManager reporting is mandatory: until it's known, position_valid defaults to
-  // false, which must not be treated as a confirmed safety-area violation
+  // position_known guards against reading a not-yet-reported position_valid as a confirmed violation
   bool got_safety_area_manager = got_general_robot_info && sh_general_robot_info_.getMsg()->preflight_status.position_known;
 
-  // all four come from DiagnosticsManager (SafetyAreaManager only via its relayed position_known),
-  // so a missing reading is attributed to it directly; DiagnosticsManager's own timerErrorPublishing()
-  // separately attributes to SafetyAreaManager specifically
+  // all four come via DiagnosticsManager, so a missing reading is attributed to it here;
+  // DiagnosticsManager's own timerErrorPublishing() attributes SafetyAreaManager specifically
   if (!got_control_info || !got_uav_state || !got_general_robot_info || !got_safety_area_manager) {
     RCLCPP_WARN_THROTTLE(
         node_->get_logger(), *clock_, 5000,
@@ -433,8 +422,7 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
 
     // | -------------------- ready to takeoff -------------------- |
 
-    // safe to read directly: output_enabled defaults to false in ControlInfo whenever its source
-    // (control_manager_diagnostics) was invalid, so a stale read can only ever surface as false
+    // safe to read directly: output_enabled defaults to false whenever its source was invalid
     bool control_output_enabled = control_info->output_enabled;
 
     std_msgs::msg::Bool ready_to_enable_control_output_msg;
