@@ -134,6 +134,7 @@ private:
   bool   _handle_takeoff_ = false;
   double _safety_timeout_;
   double _control_output_timeout_;
+  double _diagnostics_manager_timeout_;
 
   // | ---------------------- state machine --------------------- |
 
@@ -190,6 +191,7 @@ AutomaticStart::AutomaticStart(rclcpp::NodeOptions options) : Node("automatic_st
 
   param_loader.loadParam("mrs_uav_autostart/main_timer_rate", _main_timer_rate_);
   param_loader.loadParam("mrs_uav_autostart/control_output_timeout", _control_output_timeout_);
+  param_loader.loadParam("mrs_uav_autostart/diagnostics_manager_timeout", _diagnostics_manager_timeout_);
 
   param_loader.loadParam("mrs_uav_autostart/safety_timeout", _safety_timeout_);
   param_loader.loadParam("mrs_uav_autostart/pre_takeoff_sleep", _pre_takeoff_sleep_);
@@ -362,16 +364,28 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
     co_return;
   }
 
-  bool got_control_info       = sh_control_info_.hasMsg();
-  bool got_uav_state          = sh_uav_state_.hasMsg() && uav_state_valid_ever_;
-  bool got_general_robot_info = sh_general_robot_info_.hasMsg();
+  bool got_control_info = sh_control_info_.hasMsg();
+  bool got_uav_state    = sh_uav_state_.hasMsg() && uav_state_valid_ever_;
 
-  // all three come from DiagnosticsManager, so a missing reading is attributed to it directly
-  if (!got_control_info || !got_uav_state || !got_general_robot_info) {
+  // freshness-checked: published in the same DiagnosticsManager tick as control_info/uav_state,
+  // so this one check also catches DiagnosticsManager having died
+  bool got_general_robot_info =
+      sh_general_robot_info_.hasMsg() && (clock_->now() - sh_general_robot_info_.lastMsgTime()).seconds() <= _diagnostics_manager_timeout_;
+
+  // SafetyAreaManager reporting is mandatory: until it's known, position_valid defaults to
+  // false, which must not be treated as a confirmed safety-area violation
+  bool got_safety_area_manager = got_general_robot_info && sh_general_robot_info_.getMsg()->preflight_status.position_known;
+
+  // all four come from DiagnosticsManager (SafetyAreaManager only via its relayed position_known),
+  // so a missing reading is attributed to it directly; DiagnosticsManager's own timerErrorPublishing()
+  // separately attributes to SafetyAreaManager specifically
+  if (!got_control_info || !got_uav_state || !got_general_robot_info || !got_safety_area_manager) {
     RCLCPP_WARN_THROTTLE(
         node_->get_logger(), *clock_, 5000,
-        "waiting for data: DiagnosticsManager (control_info)=%s, DiagnosticsManager (uav_state)=%s, DiagnosticsManager (general_robot_info)=%s",
-        got_control_info ? "true" : "FALSE", got_uav_state ? "true" : "FALSE", got_general_robot_info ? "true" : "FALSE");
+        "waiting for data: DiagnosticsManager (control_info)=%s, DiagnosticsManager (uav_state)=%s, DiagnosticsManager (general_robot_info)=%s, "
+        "DiagnosticsManager (safety_area_manager)=%s",
+        got_control_info ? "true" : "FALSE", got_uav_state ? "true" : "FALSE", got_general_robot_info ? "true" : "FALSE",
+        got_safety_area_manager ? "true" : "FALSE");
     error_publisher_->addWaitingForNodeError({"DiagnosticsManager", "main"});
 
     co_return;

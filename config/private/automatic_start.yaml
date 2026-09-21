@@ -3,3 +3,5 @@ mrs_uav_autostart:
   main_timer_rate: 30.0 # [Hz]
 
   control_output_timeout: 1.5 # [s]
+
+  diagnostics_manager_timeout: 3.0 # [s]
