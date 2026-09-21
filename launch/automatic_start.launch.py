@@ -124,8 +124,8 @@ def generate_launch_description():
 
                 remappings=[
                     # subscribers
-                    ("~/hw_api_status_in", "hw_api/status"),
-                    ("~/control_manager_diagnostics_in", "control_manager/diagnostics"),
+                    ("~/uav_state_in", "diagnostics_manager/uav_state"),
+                    ("~/control_info_in", "diagnostics_manager/control_info"),
                     ("~/gazebo_spawner_diagnostics_in", "/mrs_drone_spawner/diagnostics"),
                     ("~/general_robot_info_in", "diagnostics_manager/general_robot_info"),
                     # publishers

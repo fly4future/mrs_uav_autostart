@@ -16,9 +16,9 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 
-#include <mrs_msgs/msg/control_manager_diagnostics.hpp>
+#include <mrs_msgs/msg/control_info.hpp>
 #include <mrs_msgs/msg/gazebo_spawner_diagnostics.hpp>
-#include <mrs_msgs/msg/hw_api_status.hpp>
+#include <mrs_msgs/msg/state.hpp>
 #include <mrs_msgs/msg/general_robot_info.hpp>
 
 //}
@@ -74,10 +74,10 @@ private:
 
   // | ----------------------- subscribers ---------------------- |
 
-  mrs_lib::SubscriberHandler<mrs_msgs::msg::HwApiStatus>               sh_hw_api_status_;
-  mrs_lib::SubscriberHandler<mrs_msgs::msg::ControlManagerDiagnostics> sh_control_manager_diag_;
-  mrs_lib::SubscriberHandler<mrs_msgs::msg::GazeboSpawnerDiagnostics>  sh_gazebo_spawner_diag_;
-  mrs_lib::SubscriberHandler<mrs_msgs::msg::GeneralRobotInfo>          sh_general_robot_info_;
+  mrs_lib::SubscriberHandler<mrs_msgs::msg::State>                    sh_uav_state_;
+  mrs_lib::SubscriberHandler<mrs_msgs::msg::ControlInfo>              sh_control_info_;
+  mrs_lib::SubscriberHandler<mrs_msgs::msg::GazeboSpawnerDiagnostics> sh_gazebo_spawner_diag_;
+  mrs_lib::SubscriberHandler<mrs_msgs::msg::GeneralRobotInfo>         sh_general_robot_info_;
 
   // | ----------------------- publishers ----------------------- |
 
@@ -89,11 +89,11 @@ private:
   mrs_lib::Task<>            timerMain();
   double                     _main_timer_rate_;
 
-  // | ------------------------- hw api ------------------------- |
+  // | ------------------------ uav state ----------------------- |
 
-  void              callbackHwApiStatus(const mrs_msgs::msg::HwApiStatus::ConstSharedPtr msg);
-  std::atomic<bool> hw_api_connected_ = false;
-  std::mutex        mutex_hw_api_status_;
+  void              callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr msg);
+  std::atomic<bool> uav_state_valid_ever_ = false;
+  std::mutex        mutex_uav_state_;
 
   // | --------------- Gazebo spawner diagnostics --------------- |
 
@@ -109,6 +109,11 @@ private:
 
   rclcpp::Time offboard_time_;
   bool         offboard_ = false;
+
+  // last confirmed (non-UNKNOWN/LINK_LOST) armed/offboard reading, so a transient staleness gap
+  // (e.g. a ControlManager hiccup) can't reset armed_time_/offboard_time_ -- only a genuine transition
+  bool last_confirmed_armed_    = false;
+  bool last_confirmed_offboard_ = false;
 
   bool we_toggled_output_ = false;
 
@@ -206,11 +211,11 @@ AutomaticStart::AutomaticStart(rclcpp::NodeOptions options) : Node("automatic_st
   shopts.autostart                           = true;
   shopts.subscription_options.callback_group = cbkgrp_;
 
-  sh_hw_api_status_        = mrs_lib::SubscriberHandler<mrs_msgs::msg::HwApiStatus>(shopts, "~/hw_api_status_in", &AutomaticStart::callbackHwApiStatus, this);
-  sh_control_manager_diag_ = mrs_lib::SubscriberHandler<mrs_msgs::msg::ControlManagerDiagnostics>(shopts, "~/control_manager_diagnostics_in");
-  sh_gazebo_spawner_diag_  = mrs_lib::SubscriberHandler<mrs_msgs::msg::GazeboSpawnerDiagnostics>(shopts, "~/gazebo_spawner_diagnostics_in",
-                                                                                                 &AutomaticStart::callbackGazeboSpawnerDiagnostics, this);
-  sh_general_robot_info_   = mrs_lib::SubscriberHandler<mrs_msgs::msg::GeneralRobotInfo>(shopts, "~/general_robot_info_in");
+  sh_uav_state_           = mrs_lib::SubscriberHandler<mrs_msgs::msg::State>(shopts, "~/uav_state_in", &AutomaticStart::callbackUavState, this);
+  sh_control_info_        = mrs_lib::SubscriberHandler<mrs_msgs::msg::ControlInfo>(shopts, "~/control_info_in");
+  sh_gazebo_spawner_diag_ = mrs_lib::SubscriberHandler<mrs_msgs::msg::GazeboSpawnerDiagnostics>(shopts, "~/gazebo_spawner_diagnostics_in",
+                                                                                                &AutomaticStart::callbackGazeboSpawnerDiagnostics, this);
+  sh_general_robot_info_  = mrs_lib::SubscriberHandler<mrs_msgs::msg::GeneralRobotInfo>(shopts, "~/general_robot_info_in");
 
   // | ----------------------- publishers ----------------------- |
 
@@ -245,33 +250,48 @@ AutomaticStart::AutomaticStart(rclcpp::NodeOptions options) : Node("automatic_st
 // |                          callbacks                         |
 // --------------------------------------------------------------
 
-/* callbackHwApiStatus() //{ */
+/* callbackUavState() //{ */
 
-void AutomaticStart::callbackHwApiStatus(const mrs_msgs::msg::HwApiStatus::ConstSharedPtr msg) {
+void AutomaticStart::callbackUavState(const mrs_msgs::msg::State::ConstSharedPtr msg) {
 
   if (!is_initialized_) {
     return;
   }
 
-  RCLCPP_INFO_ONCE(node_->get_logger(), "getting HW API status");
+  RCLCPP_INFO_ONCE(node_->get_logger(), "getting UAV state");
 
-  std::scoped_lock lock(mutex_hw_api_status_);
+  const uint8_t state = msg->state;
+
+  // DISARMED/LINK_LOST/UNKNOWN mean "not confidently armed"
+  const bool is_armed =
+      !(state == mrs_msgs::msg::State::STATE_DISARMED || state == mrs_msgs::msg::State::STATE_LINK_LOST || state == mrs_msgs::msg::State::STATE_UNKNOWN);
+
+  // Allow-list (unlike is_armed above) so an unrecognized future state defaults to false, since this
+  // gates the takeoff transition below. RC_MODE counts as offboard, unlike MANUAL (raw-autopilot RC).
+  const bool is_offboard = state == mrs_msgs::msg::State::STATE_OFFBOARD || state == mrs_msgs::msg::State::STATE_TAKEOFF ||
+                           state == mrs_msgs::msg::State::STATE_HOVER || state == mrs_msgs::msg::State::STATE_GOTO ||
+                           state == mrs_msgs::msg::State::STATE_TRAJECTORY || state == mrs_msgs::msg::State::STATE_LAND ||
+                           state == mrs_msgs::msg::State::STATE_RC_MODE;
+
+  std::scoped_lock lock(mutex_uav_state_);
 
   // check armed_ state
   if (armed_ == false) {
 
-    // if armed_ state changed to true, please "start the clock"
-    if (msg->armed) {
+    // start the clock, unless recovering from an ambiguous gap (see last_confirmed_armed_ above)
+    if (is_armed) {
 
-      armed_      = true;
-      armed_time_ = clock_->now();
+      armed_ = true;
+      if (!last_confirmed_armed_) {
+        armed_time_ = clock_->now();
+      }
     }
 
     // if we were armed_ previously
   } else if (armed_ == true) {
 
     // and we are not really now
-    if (!msg->armed) {
+    if (!is_armed) {
 
       armed_ = false;
     }
@@ -280,25 +300,30 @@ void AutomaticStart::callbackHwApiStatus(const mrs_msgs::msg::HwApiStatus::Const
   // check offboard_ state
   if (offboard_ == false) {
 
-    // if offboard_ state changed to true, please "start the clock"
-    if (msg->offboard) {
+    // same recovery-from-ambiguity exception as armed_ above
+    if (is_offboard) {
 
-      offboard_      = true;
-      offboard_time_ = clock_->now();
+      offboard_ = true;
+      if (!last_confirmed_offboard_) {
+        offboard_time_ = clock_->now();
+      }
     }
 
     // if we were in offboard_ previously
   } else if (offboard_ == true) {
 
     // and we are not really now
-    if (!msg->offboard) {
+    if (!is_offboard) {
 
       offboard_ = false;
     }
   }
 
-  if (msg->connected) {
-    hw_api_connected_ = true;
+  // latch + update the confirmed-state trackers, skipping ambiguous UNKNOWN/LINK_LOST readings
+  if (state != mrs_msgs::msg::State::STATE_LINK_LOST && state != mrs_msgs::msg::State::STATE_UNKNOWN) {
+    uav_state_valid_ever_    = true;
+    last_confirmed_armed_    = is_armed;
+    last_confirmed_offboard_ = is_offboard;
   }
 }
 
@@ -337,28 +362,23 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
     co_return;
   }
 
-  bool got_control_manager_diag = sh_control_manager_diag_.hasMsg();
-  bool got_hw_api               = sh_hw_api_status_.hasMsg() && hw_api_connected_;
-  bool got_general_robot_info   = sh_general_robot_info_.hasMsg();
+  bool got_control_info       = sh_control_info_.hasMsg();
+  bool got_uav_state          = sh_uav_state_.hasMsg() && uav_state_valid_ever_;
+  bool got_general_robot_info = sh_general_robot_info_.hasMsg();
 
-  if (!got_control_manager_diag || !got_hw_api || !got_general_robot_info) {
-    RCLCPP_WARN_THROTTLE(node_->get_logger(), *clock_, 5000, "waiting for data: ControlManager=%s, HW Api=%s, DiagnosticsManager=%s",
-                         got_control_manager_diag ? "true" : "FALSE", got_hw_api ? "true" : "FALSE", got_general_robot_info ? "true" : "FALSE");
-    if (!got_hw_api) {
-      error_publisher_->addWaitingForNodeError({"HwApiManager", "main"});
-    }
-    if (!got_control_manager_diag) {
-      error_publisher_->addWaitingForNodeError({"ControlManager", "main"});
-    }
-    if (!got_general_robot_info) {
-      error_publisher_->addWaitingForNodeError({"DiagnosticsManager", "main"});
-    }
+  // all three come from DiagnosticsManager, so a missing reading is attributed to it directly
+  if (!got_control_info || !got_uav_state || !got_general_robot_info) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *clock_, 5000,
+        "waiting for data: DiagnosticsManager (control_info)=%s, DiagnosticsManager (uav_state)=%s, DiagnosticsManager (general_robot_info)=%s",
+        got_control_info ? "true" : "FALSE", got_uav_state ? "true" : "FALSE", got_general_robot_info ? "true" : "FALSE");
+    error_publisher_->addWaitingForNodeError({"DiagnosticsManager", "main"});
 
     co_return;
   }
 
-  auto [armed, offboard, armed_time, offboard_time] = mrs_lib::get_mutexed(mutex_hw_api_status_, armed_, offboard_, armed_time_, offboard_time_);
-  auto control_manager_diagnostics                  = sh_control_manager_diag_.getMsg();
+  auto [armed, offboard, armed_time, offboard_time] = mrs_lib::get_mutexed(mutex_uav_state_, armed_, offboard_, armed_time_, offboard_time_);
+  auto control_info                                 = sh_control_info_.getMsg();
 
   switch (current_state) {
 
@@ -399,7 +419,9 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
 
     // | -------------------- ready to takeoff -------------------- |
 
-    bool control_output_enabled = sh_control_manager_diag_.getMsg()->output_enabled;
+    // safe to read directly: output_enabled defaults to false in ControlInfo whenever its source
+    // (control_manager_diagnostics) was invalid, so a stale read can only ever surface as false
+    bool control_output_enabled = control_info->output_enabled;
 
     std_msgs::msg::Bool ready_to_enable_control_output_msg;
     ready_to_enable_control_output_msg.data = false;
@@ -483,7 +505,7 @@ mrs_lib::Task<> AutomaticStart::timerMain() {
   case STATE_TAKEOFF: {
 
     // if takeoff finished
-    if (control_manager_diagnostics->flying_normally) {
+    if (control_info->flying_normally) {
 
       RCLCPP_INFO_THROTTLE(node_->get_logger(), *clock_, 1000, "takeoff finished");
 
@@ -627,14 +649,14 @@ mrs_lib::Task<bool> AutomaticStart::toggleControlOutput(const bool &value) {
 
 mrs_lib::Task<bool> AutomaticStart::disarm() {
 
-  if (!hw_api_connected_) {
+  if (!uav_state_valid_ever_) {
 
-    RCLCPP_WARN_THROTTLE(node_->get_logger(), *clock_, 1000, "cannot disarm, missing HW API status!");
+    RCLCPP_WARN_THROTTLE(node_->get_logger(), *clock_, 1000, "cannot disarm, missing UAV state!");
 
     co_return false;
   }
 
-  auto [armed, offboard, armed_time, offboard_time] = mrs_lib::get_mutexed(mutex_hw_api_status_, armed_, offboard_, armed_time_, offboard_time_);
+  auto [armed, offboard, armed_time, offboard_time] = mrs_lib::get_mutexed(mutex_uav_state_, armed_, offboard_, armed_time_, offboard_time_);
 
   if (offboard) {
 
