@@ -586,8 +586,6 @@ mrs_lib::Task<> AutomaticStart::changeState(LandingStates_t new_state) {
 
     break;
   }
-
-  break;
   }
 
   current_state = new_state;
